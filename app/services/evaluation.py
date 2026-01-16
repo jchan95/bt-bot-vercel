@@ -43,6 +43,34 @@ Respond in this exact JSON format:
 }"""
 
 
+CITATION_ACCURACY_PROMPT = """You are verifying citation accuracy in an AI-generated answer.
+
+For each citation in the answer (formatted like [Article Title, Date]), determine:
+1. Does the citation match a real article from the provided sources list?
+2. Does the claim being cited actually align with what that article says?
+
+SOURCES PROVIDED TO THE SYSTEM:
+{sources}
+
+ANSWER WITH CITATIONS:
+{answer}
+
+For each citation found, evaluate it:
+- "valid": The article exists AND the claim aligns with the article's thesis/content
+- "exists_but_misused": The article exists but the claim doesn't match
+- "hallucinated": The article title doesn't match any provided source
+
+Respond in this exact JSON format:
+{{
+  "citations_found": [
+    {{"citation": "[Article Title, Date]", "claim": "the claim being made", "status": "valid|exists_but_misused|hallucinated", "reason": "brief explanation"}}
+  ],
+  "total_citations": <number>,
+  "valid_count": <number>,
+  "accuracy_score": <0.0-1.0>
+}}"""
+
+
 @dataclass
 class JudgeResult:
     relevance: float
@@ -50,6 +78,16 @@ class JudgeResult:
     completeness: float
     avg_score: float
     reasoning: str
+
+
+@dataclass
+class CitationAccuracyResult:
+    total_citations: int
+    valid_count: int
+    exists_but_misused: int
+    hallucinated: int
+    accuracy_score: float
+    citations: List[Dict]
 
 
 class EvaluationService:
@@ -61,9 +99,63 @@ class EvaluationService:
         self.query_service = get_query_service()
         self.judge_model = "gpt-4o-mini"
     
+    def _evaluate_citation_accuracy(self, answer: str, sources: List[Dict]) -> CitationAccuracyResult:
+        """Evaluate accuracy of citations in reasoning-first answers."""
+
+        # Build detailed source info for verification
+        source_text = "\n".join([
+            f"- Title: \"{s.get('title', 'Unknown')}\"\n  Date: {s.get('date', 'Unknown')}\n  Thesis: {s.get('thesis_statement', 'N/A')[:200] if s.get('thesis_statement') else 'N/A'}"
+            for s in sources
+        ])
+
+        prompt = CITATION_ACCURACY_PROMPT.format(
+            sources=source_text,
+            answer=answer
+        )
+
+        response = self.openai.chat.completions.create(
+            model=self.judge_model,
+            messages=[
+                {"role": "system", "content": "You verify citation accuracy. Respond only with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=1500
+        )
+
+        try:
+            result_text = response.choices[0].message.content.strip()
+            if result_text.startswith("```"):
+                result_text = result_text.split("```")[1]
+                if result_text.startswith("json"):
+                    result_text = result_text[4:]
+
+            result = json.loads(result_text)
+
+            citations = result.get("citations_found", [])
+            valid = sum(1 for c in citations if c.get("status") == "valid")
+            misused = sum(1 for c in citations if c.get("status") == "exists_but_misused")
+            hallucinated = sum(1 for c in citations if c.get("status") == "hallucinated")
+            total = len(citations)
+
+            return CitationAccuracyResult(
+                total_citations=total,
+                valid_count=valid,
+                exists_but_misused=misused,
+                hallucinated=hallucinated,
+                accuracy_score=valid / total if total > 0 else 1.0,
+                citations=citations
+            )
+        except Exception as e:
+            logger.error(f"Error parsing citation accuracy response: {e}")
+            return CitationAccuracyResult(
+                total_citations=0, valid_count=0, exists_but_misused=0,
+                hallucinated=0, accuracy_score=0, citations=[]
+            )
+
     def _judge_answer(self, question: str, answer: str, sources: List[Dict]) -> JudgeResult:
         """Use LLM to judge answer quality."""
-        
+
         source_text = "\n".join([
             f"- {s.get('title', 'Unknown')} ({s.get('date', 'Unknown')})"
             for s in sources
@@ -240,6 +332,136 @@ Evaluate this answer."""
             "difficulty": difficulty
         }).execute()
         return result.data[0] if result.data else {}
+
+
+    def eval_citation_accuracy(self, question: str) -> Dict[str, Any]:
+        """
+        Run a single question through reasoning-first mode and evaluate citation accuracy.
+        """
+        logger.info(f"Running citation accuracy eval for: {question[:50]}...")
+
+        # Run reasoning-first query
+        query_result = self.query_service.query_reasoning(
+            question=question,
+            limit=5,
+            threshold=0.3
+        )
+
+        # Evaluate citations
+        citation_result = self._evaluate_citation_accuracy(
+            query_result.answer,
+            query_result.sources
+        )
+
+        return {
+            "question": question,
+            "answer": query_result.answer,
+            "sources": query_result.sources,
+            "citation_eval": {
+                "total_citations": citation_result.total_citations,
+                "valid": citation_result.valid_count,
+                "exists_but_misused": citation_result.exists_but_misused,
+                "hallucinated": citation_result.hallucinated,
+                "accuracy_score": citation_result.accuracy_score,
+                "details": citation_result.citations
+            }
+        }
+
+    def eval_citation_accuracy_batch(self) -> Dict[str, Any]:
+        """
+        Run citation accuracy eval on all examples in reasoning-first mode.
+        Persists results to database.
+        """
+        examples = self.get_examples()
+
+        if not examples:
+            return {"error": "No eval examples found"}
+
+        results = []
+        total_citations = 0
+        total_valid = 0
+        total_misused = 0
+        total_hallucinated = 0
+
+        for ex in examples:
+            logger.info(f"Evaluating: {ex['question'][:40]}...")
+            result = self.eval_citation_accuracy(ex["question"])
+            results.append({
+                "question": ex["question"],
+                "accuracy_score": result["citation_eval"]["accuracy_score"],
+                "total_citations": result["citation_eval"]["total_citations"],
+                "valid": result["citation_eval"]["valid"],
+                "misused": result["citation_eval"]["exists_but_misused"],
+                "hallucinated": result["citation_eval"]["hallucinated"],
+                "details": result["citation_eval"]["details"]
+            })
+
+            total_citations += result["citation_eval"]["total_citations"]
+            total_valid += result["citation_eval"]["valid"]
+            total_misused += result["citation_eval"]["exists_but_misused"]
+            total_hallucinated += result["citation_eval"]["hallucinated"]
+
+        overall_accuracy = total_valid / total_citations if total_citations > 0 else 0
+
+        # Persist to database
+        run_data = {
+            "completed_at": datetime.utcnow().isoformat(),
+            "total_examples": len(examples),
+            "total_citations": total_citations,
+            "valid_citations": total_valid,
+            "misused_citations": total_misused,
+            "hallucinated_citations": total_hallucinated,
+            "overall_accuracy": round(overall_accuracy, 4),
+            "results": results
+        }
+
+        try:
+            db_result = self.supabase.table("citation_accuracy_runs").insert(run_data).execute()
+            run_id = db_result.data[0]["run_id"] if db_result.data else None
+            logger.info(f"Saved citation accuracy run: {run_id}")
+        except Exception as e:
+            logger.error(f"Failed to save citation accuracy run: {e}")
+            run_id = None
+
+        return {
+            "run_id": run_id,
+            "total_examples": len(examples),
+            "aggregate": {
+                "total_citations": total_citations,
+                "valid": total_valid,
+                "exists_but_misused": total_misused,
+                "hallucinated": total_hallucinated,
+                "overall_accuracy": overall_accuracy
+            },
+            "results": [
+                {
+                    "question": r["question"][:50] + "..." if len(r["question"]) > 50 else r["question"],
+                    "accuracy_score": r["accuracy_score"],
+                    "total_citations": r["total_citations"],
+                    "valid": r["valid"],
+                    "hallucinated": r["hallucinated"]
+                }
+                for r in results
+            ]
+        }
+
+    def get_citation_accuracy_runs(self, limit: int = 10) -> List[Dict]:
+        """Get recent citation accuracy runs."""
+        result = self.supabase.table("citation_accuracy_runs")\
+            .select("run_id, started_at, completed_at, total_examples, total_citations, valid_citations, misused_citations, hallucinated_citations, overall_accuracy")\
+            .order("started_at", desc=True)\
+            .limit(limit)\
+            .execute()
+        return result.data or []
+
+    def get_citation_accuracy_run_details(self, run_id: str) -> Dict[str, Any]:
+        """Get detailed results for a citation accuracy run."""
+        result = self.supabase.table("citation_accuracy_runs")\
+            .select("*")\
+            .eq("run_id", run_id)\
+            .single()\
+            .execute()
+        return result.data if result.data else {}
 
 
 # Singleton

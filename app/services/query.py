@@ -370,12 +370,21 @@ Provide a structured analysis based on the context above."""
             meta = metadata.get(issue_id, {})
             title = meta.get("title", "Unknown")
             date = str(meta.get("publication_date", ""))[:10]
+            # Extract key claims - handle both string and dict formats
+            key_claims = d.get('key_claims', [])
+            if key_claims and isinstance(key_claims[0], dict):
+                claims_text = ', '.join([c.get('claim', str(c)) for c in key_claims[:3]])
+            elif key_claims:
+                claims_text = ', '.join(key_claims[:3])
+            else:
+                claims_text = 'N/A'
+
             source_parts.append(f"""
 Source {i} (Distillation):
 Title: {title}
 Date: {date}
 Thesis: {d.get('thesis_statement', 'N/A')}
-Key Claims: {', '.join(d.get('key_claims', [])[:3]) if d.get('key_claims') else 'N/A'}
+Key Claims: {claims_text}
 """)
 
         for i, c in enumerate(chunks, len(distillations) + 1):

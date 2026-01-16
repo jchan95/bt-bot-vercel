@@ -63,3 +63,41 @@ async def get_run_details(run_id: str):
     """Get detailed results for a run."""
     service = get_eval_service()
     return service.get_run_details(run_id)
+
+
+class CitationEvalRequest(BaseModel):
+    question: str
+
+
+@router.post("/citation-accuracy")
+async def eval_citation_accuracy(request: CitationEvalRequest):
+    """
+    Run citation accuracy eval on a single question in reasoning-first mode.
+    Tests if the LLM's citations match real articles and claims.
+    """
+    service = get_eval_service()
+    return service.eval_citation_accuracy(request.question)
+
+
+@router.post("/citation-accuracy/batch")
+async def eval_citation_accuracy_batch():
+    """
+    Run citation accuracy eval on all examples in reasoning-first mode.
+    Returns aggregate stats on citation quality. Persists to database.
+    """
+    service = get_eval_service()
+    return service.eval_citation_accuracy_batch()
+
+
+@router.get("/citation-accuracy/runs")
+async def get_citation_accuracy_runs(limit: int = 10):
+    """Get recent citation accuracy runs."""
+    service = get_eval_service()
+    return {"runs": service.get_citation_accuracy_runs(limit)}
+
+
+@router.get("/citation-accuracy/runs/{run_id}")
+async def get_citation_accuracy_run_details(run_id: str):
+    """Get detailed results for a citation accuracy run."""
+    service = get_eval_service()
+    return service.get_citation_accuracy_run_details(run_id)

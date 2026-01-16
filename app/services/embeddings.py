@@ -508,30 +508,70 @@ class EmbeddingsService:
     # ==================== STATS ====================
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get embedding statistics."""
+        """Get embedding statistics and metadata for the UI."""
         issues = self.supabase.table("stratechery_issues")\
             .select("issue_id", count="exact").execute()
-        
+
         chunks = self.supabase.table("stratechery_chunks")\
             .select("chunk_id", count="exact").execute()
-        
+
         chunk_embeds = self.supabase.table("chunk_embeddings")\
             .select("embedding_id", count="exact").execute()
-        
+
         distillations = self.supabase.table("stratechery_distillations")\
             .select("distillation_id", count="exact").execute()
-        
+
         distill_embeds = self.supabase.table("distillation_embeddings")\
             .select("embedding_id", count="exact").execute()
-        
+
+        # Get date range of articles
+        oldest = self.supabase.table("stratechery_issues")\
+            .select("publication_date")\
+            .order("publication_date", desc=False)\
+            .limit(1).execute()
+
+        newest = self.supabase.table("stratechery_issues")\
+            .select("publication_date")\
+            .order("publication_date", desc=True)\
+            .limit(1).execute()
+
+        # Get sample topics from distillations
+        sample_topics = self.supabase.table("stratechery_distillations")\
+            .select("topics")\
+            .limit(50).execute()
+
+        # Flatten and count topics
+        topic_counts = {}
+        for d in (sample_topics.data or []):
+            for topic in (d.get("topics") or []):
+                topic_counts[topic] = topic_counts.get(topic, 0) + 1
+
+        # Get top 10 topics
+        top_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # Get a few recent article titles as examples
+        recent_articles = self.supabase.table("stratechery_issues")\
+            .select("title, publication_date")\
+            .order("publication_date", desc=True)\
+            .limit(5).execute()
+
         return {
-            "total_issues": issues.count or 0,
+            "total_articles": issues.count or 0,
             "total_chunks": chunks.count or 0,
             "chunk_embeddings": chunk_embeds.count or 0,
             "chunks_pending_embedding": (chunks.count or 0) - (chunk_embeds.count or 0),
             "total_distillations": distillations.count or 0,
             "distillation_embeddings": distill_embeds.count or 0,
             "distillations_pending_embedding": (distillations.count or 0) - (distill_embeds.count or 0),
+            "date_range": {
+                "oldest": oldest.data[0]["publication_date"] if oldest.data else None,
+                "newest": newest.data[0]["publication_date"] if newest.data else None,
+            },
+            "top_topics": [t[0] for t in top_topics],
+            "recent_articles": [
+                {"title": a["title"], "date": a["publication_date"]}
+                for a in (recent_articles.data or [])
+            ],
         }
 
 
