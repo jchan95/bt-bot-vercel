@@ -5,8 +5,9 @@ fastapi==0.109.0
 uvicorn[standard]==0.27.0
 python-multipart==0.0.6
 
-# Database
-supabase==2.3.4
+# Database - pinned to older version for httpx compatibility
+supabase==2.0.0
+httpx==0.25.2
 
 # AI Services
 openai==1.12.0
@@ -26,4 +27,3 @@ numpy==1.26.4
 
 # Development (not needed for production)
 # pytest
-# httpx
