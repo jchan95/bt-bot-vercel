@@ -36,7 +36,7 @@ class QueryResponse(BaseModel):
     retrieval_tier: str
 
 
-@router.post("/", response_model=QueryResponse)
+@router.post("", response_model=QueryResponse)
 async def query(request: QueryRequest):
     """Ask a question and get a Ben Thompson-style analysis."""
     service = get_query_service()
@@ -65,7 +65,7 @@ async def query(request: QueryRequest):
     }
 
 
-@router.get("/")
+@router.get("")
 async def query_get(
     q: str, 
     limit: int = 5, 
